@@ -44,10 +44,10 @@ def verify_signature(payload_body, secret_token, signature_header):
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(docs_url=None, redoc_url=None)
 
 DEPLOY_SCRIPTS_FILE = os.getenv("DEPLOY_SCRIPTS_FILE", "deploy_scripts.json")
-GITHUB_IPS_ONLY = os.getenv("GITHUB_IPS_ONLY", "True").lower() in ["true", "1"]
+GITHUB_IPS_ONLY = os.getenv("GITHUB_IPS_ONLY", "False").lower() in ["true", "1"]
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 
@@ -57,7 +57,7 @@ with open(DEPLOY_SCRIPTS_FILE) as fh:
 
 
 def deploy_application(script_name):
-    subprocess.run(script_name)
+    subprocess.run(script_name, shell=True, env=os.environ)
 
 
 AppNames = Enum("AppNames", [(k, k) for k in DEPLOY_SCRIPTS.keys()], type=str)
@@ -95,9 +95,9 @@ async def receive_payload(
         signature_header = request.headers.get("x-hub-signature-256")
         verify_signature(payload_body, WEBHOOK_SECRET, signature_header)
 
-    if x_github_event == "push":
-        payload = json.loads(payload_body)
+    payload = json.loads(payload_body)
 
+    if x_github_event == "push":
         default_branch = payload["repository"]["default_branch"]
         # check if event is referencing the default branch
         if "ref" in payload and payload["ref"] == f"refs/heads/{default_branch}":
@@ -113,10 +113,18 @@ async def receive_payload(
     elif x_github_event == "ping":
         return {"message": "pong"}
 
-    else:
-        return {
-            "message": f"Unable to process action [{x_github_event}] for [{app_name}]"
-        }
+    if issue_id := payload.get("issue", {}).get("number"):
+        action_arg = "c"
+        if x_github_event == "issues" and payload.get("action") == "deleted":
+            action_arg = "d"
+
+        script_name = DEPLOY_SCRIPTS[app_name]
+        background_tasks.add_task(
+            deploy_application, f"{script_name} {action_arg} {issue_id}"
+        )
+        return {"message": f"Deployment started for [{app_name}]"}
+
+    return {"message": f"Unable to process action [{x_github_event}] for [{app_name}]"}
 
 
 if __name__ == "__main__":
